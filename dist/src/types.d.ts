@@ -1,0 +1,39 @@
+/**
+ * 搜索结果接口
+ */
+export interface SearchResult {
+    title: string;
+    link: string;
+    snippet: string;
+}
+/**
+ * 搜索响应接口
+ */
+export interface SearchResponse {
+    query: string;
+    results: SearchResult[];
+}
+/**
+ * 命令行选项接口
+ */
+export interface CommandOptions {
+    limit?: number;
+    timeout?: number;
+    headless?: boolean;
+    stateFile?: string;
+    noSaveState?: boolean;
+    locale?: string;
+    manualVerification?: boolean;
+    googleDomain?: string;
+}
+/**
+ * HTML响应接口 - 用于获取原始搜索页面HTML
+ */
+export interface HtmlResponse {
+    query: string;
+    html: string;
+    url: string;
+    savedPath?: string;
+    screenshotPath?: string;
+    originalHtmlLength?: number;
+}
