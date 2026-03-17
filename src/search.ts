@@ -1,4 +1,4 @@
-import { chromium, devices, BrowserContextOptions, Browser } from "playwright";
+import { chromium, devices, BrowserContextOptions, Browser, Page } from "playwright";
 import { SearchResponse, SearchResult, CommandOptions, HtmlResponse } from "./types.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -22,6 +22,47 @@ interface SavedState {
   googleDomain?: string;
 }
 
+const DEFAULT_LOCALE = "en-US";
+const DEFAULT_TIMEZONE = "America/Denver";
+const DEFAULT_GOOGLE_DOMAIN = "https://www.google.com/ncr";
+
+function getPreferredTimezone(): string {
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return timezone || DEFAULT_TIMEZONE;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
+}
+
+async function waitForManualVerification(
+  page: Page,
+  sorryPatterns: string[],
+  timeout: number,
+  reason: string
+) {
+  const verificationTimeout = Math.max(timeout * 6, 300000);
+
+  logger.warn(
+    {
+      reason,
+      url: page.url(),
+      verificationTimeout,
+    },
+    "检测到人机验证。当前实现不会自动求解验证码，将等待人工完成验证。"
+  );
+
+  await page.waitForURL(
+    (url) => {
+      const urlStr = url.toString();
+      return sorryPatterns.every((pattern) => !urlStr.includes(pattern));
+    },
+    { timeout: verificationTimeout }
+  );
+
+  logger.info("人机验证已完成，继续执行...");
+}
+
 /**
  * 获取宿主机器的实际配置
  * @param userLocale 用户指定的区域设置（如果有）
@@ -29,12 +70,12 @@ interface SavedState {
  */
 function getHostMachineConfig(userLocale?: string): FingerprintConfig {
   // 获取系统区域设置
-  const systemLocale = userLocale || process.env.LANG || "zh-CN";
+  const systemLocale = userLocale || process.env.LANG || DEFAULT_LOCALE;
 
   // 获取系统时区
   // Node.js 不直接提供时区信息，但可以通过时区偏移量推断
   const timezoneOffset = new Date().getTimezoneOffset();
-  let timezoneId = "Asia/Shanghai"; // 默认使用上海时区
+  let timezoneId = getPreferredTimezone();
 
   // 根据时区偏移量粗略推断时区
   // 时区偏移量是以分钟为单位，与UTC的差值，负值表示东区
@@ -115,11 +156,13 @@ export async function googleSearch(
     timeout = 60000,
     stateFile = "./browser-state.json",
     noSaveState = false,
-    locale = "zh-CN", // 默认使用中文
+    locale = DEFAULT_LOCALE,
+    headless = true,
+    manualVerification = false,
+    googleDomain = DEFAULT_GOOGLE_DOMAIN,
   } = options;
 
-  // 忽略传入的headless参数，总是以无头模式启动
-  let useHeadless = true;
+  let useHeadless = manualVerification ? false : headless;
 
   logger.info({ options }, "正在初始化浏览器...");
 
@@ -160,23 +203,6 @@ export async function googleSearch(
     "Desktop Edge",
     "Desktop Firefox",
     "Desktop Safari",
-  ];
-
-  // 时区列表
-  const timezoneList = [
-    "America/New_York",
-    "Europe/London",
-    "Asia/Shanghai",
-    "Europe/Berlin",
-    "Asia/Tokyo",
-  ];
-
-  // Google域名列表
-  const googleDomains = [
-    "https://www.google.com",
-    "https://www.google.co.uk",
-    "https://www.google.ca",
-    "https://www.google.com.au",
   ];
 
   // 获取随机设备配置或使用保存的配置
@@ -336,7 +362,7 @@ export async function googleSearch(
         get: () => [1, 2, 3, 4, 5],
       });
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en", "zh-CN"],
+        get: () => [locale, locale.split("-")[0] || "en", "en-US", "en"],
       });
 
       // 覆盖 window 属性
@@ -384,11 +410,9 @@ export async function googleSearch(
         selectedDomain = savedState.googleDomain;
         logger.info({ domain: selectedDomain }, "使用保存的Google域名");
       } else {
-        selectedDomain =
-          googleDomains[Math.floor(Math.random() * googleDomains.length)];
-        // 保存选择的域名
+        selectedDomain = googleDomain;
         savedState.googleDomain = selectedDomain;
-        logger.info({ domain: selectedDomain }, "随机选择Google域名");
+        logger.info({ domain: selectedDomain }, "使用配置的Google域名");
       }
 
       logger.info("正在访问Google搜索页面...");
@@ -486,18 +510,7 @@ export async function googleSearch(
             return performSearch(false); // 以有头模式重新执行搜索
           }
         } else {
-          logger.warn("检测到人机验证页面，请在浏览器中完成验证...");
-          // 等待用户完成验证并重定向回搜索页面
-          await page.waitForNavigation({
-            timeout: timeout * 2,
-            url: (url) => {
-              const urlStr = url.toString();
-              return sorryPatterns.every(
-                (pattern) => !urlStr.includes(pattern)
-              );
-            },
-          });
-          logger.info("人机验证已完成，继续搜索...");
+          await waitForManualVerification(page, sorryPatterns, timeout, "initial-page");
         }
       }
 
@@ -622,18 +635,7 @@ export async function googleSearch(
             return performSearch(false); // 以有头模式重新执行搜索
           }
         } else {
-          logger.warn("搜索后检测到人机验证页面，请在浏览器中完成验证...");
-          // 等待用户完成验证并重定向回搜索页面
-          await page.waitForNavigation({
-            timeout: timeout * 2,
-            url: (url) => {
-              const urlStr = url.toString();
-              return sorryPatterns.every(
-                (pattern) => !urlStr.includes(pattern)
-              );
-            },
-          });
-          logger.info("人机验证已完成，继续搜索...");
+          await waitForManualVerification(page, sorryPatterns, timeout, "after-search");
 
           // 等待页面重新加载
           await page.waitForLoadState("networkidle", { timeout });
@@ -743,20 +745,7 @@ export async function googleSearch(
               return performSearch(false); // 以有头模式重新执行搜索
             }
           } else {
-            logger.warn(
-              "等待搜索结果时检测到人机验证页面，请在浏览器中完成验证..."
-            );
-            // 等待用户完成验证并重定向回搜索页面
-            await page.waitForNavigation({
-              timeout: timeout * 2,
-              url: (url) => {
-                const urlStr = url.toString();
-                return sorryPatterns.every(
-                  (pattern) => !urlStr.includes(pattern)
-                );
-              },
-            });
-            logger.info("人机验证已完成，继续搜索...");
+            await waitForManualVerification(page, sorryPatterns, timeout, "results-page");
 
             // 再次尝试等待搜索结果
             for (const selector of searchResultSelectors) {
@@ -1048,11 +1037,13 @@ export async function getGoogleSearchPageHtml(
     timeout = 60000,
     stateFile = "./browser-state.json",
     noSaveState = false,
-    locale = "zh-CN", // 默认使用中文
+    locale = DEFAULT_LOCALE,
+    headless = true,
+    manualVerification = false,
+    googleDomain = DEFAULT_GOOGLE_DOMAIN,
   } = options;
 
-  // 忽略传入的headless参数，总是以无头模式启动
-  let useHeadless = true;
+  let useHeadless = manualVerification ? false : headless;
 
   logger.info({ options }, "正在初始化浏览器以获取搜索页面HTML...");
 
@@ -1094,14 +1085,6 @@ export async function getGoogleSearchPageHtml(
     "Desktop Edge",
     "Desktop Firefox",
     "Desktop Safari",
-  ];
-
-  // Google域名列表
-  const googleDomains = [
-    "https://www.google.com",
-    "https://www.google.co.uk",
-    "https://www.google.ca",
-    "https://www.google.com.au",
   ];
 
   // 获取随机设备配置或使用保存的配置
@@ -1249,7 +1232,7 @@ export async function getGoogleSearchPageHtml(
         get: () => [1, 2, 3, 4, 5],
       });
       Object.defineProperty(navigator, "languages", {
-        get: () => ["en-US", "en", "zh-CN"],
+        get: () => [locale, locale.split("-")[0] || "en", "en-US", "en"],
       });
 
       // 覆盖 window 属性
@@ -1297,11 +1280,9 @@ export async function getGoogleSearchPageHtml(
         selectedDomain = savedState.googleDomain;
         logger.info({ domain: selectedDomain }, "使用保存的Google域名");
       } else {
-        selectedDomain =
-          googleDomains[Math.floor(Math.random() * googleDomains.length)];
-        // 保存选择的域名
+        selectedDomain = googleDomain;
         savedState.googleDomain = selectedDomain;
-        logger.info({ domain: selectedDomain }, "随机选择Google域名");
+        logger.info({ domain: selectedDomain }, "使用配置的Google域名");
       }
 
       logger.info("正在访问Google搜索页面...");
@@ -1340,18 +1321,7 @@ export async function getGoogleSearchPageHtml(
           // 以有头模式重新执行
           return performSearchAndGetHtml(false);
         } else {
-          logger.warn("检测到人机验证页面，请在浏览器中完成验证...");
-          // 等待用户完成验证并重定向回搜索页面
-          await page.waitForNavigation({
-            timeout: timeout * 2,
-            url: (url) => {
-              const urlStr = url.toString();
-              return sorryPatterns.every(
-                (pattern) => !urlStr.includes(pattern)
-              );
-            },
-          });
-          logger.info("人机验证已完成，继续搜索...");
+          await waitForManualVerification(page, sorryPatterns, timeout, "html-initial-page");
         }
       }
 
@@ -1415,18 +1385,7 @@ export async function getGoogleSearchPageHtml(
           // 以有头模式重新执行
           return performSearchAndGetHtml(false);
         } else {
-          logger.warn("搜索后检测到人机验证页面，请在浏览器中完成验证...");
-          // 等待用户完成验证并重定向回搜索页面
-          await page.waitForNavigation({
-            timeout: timeout * 2,
-            url: (url) => {
-              const urlStr = url.toString();
-              return sorryPatterns.every(
-                (pattern) => !urlStr.includes(pattern)
-              );
-            },
-          });
-          logger.info("人机验证已完成，继续搜索...");
+          await waitForManualVerification(page, sorryPatterns, timeout, "html-after-search");
 
           // 等待页面重新加载
           await page.waitForLoadState("networkidle", { timeout });
