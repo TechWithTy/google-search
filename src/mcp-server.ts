@@ -108,10 +108,10 @@ server.tool(
 // 启动服务器
 async function main() {
   try {
-    logger.info("正在启动Google搜索MCP服务器...");
+    logger.info("Starting Google Search MCP server...");
 
     // 初始化全局浏览器实例
-    logger.info("正在初始化全局浏览器实例...");
+    logger.info("Initializing global browser instance...");
     globalBrowser = await chromium.launch({
       headless: true,
       args: [
@@ -194,7 +194,7 @@ async function main() {
 // 清理浏览器资源
 async function cleanupBrowser() {
   if (globalBrowser) {
-    logger.info("正在关闭全局浏览器实例...");
+    logger.info("Closing global browser instance...");
     try {
       await globalBrowser.close();
       globalBrowser = undefined;

@@ -39,21 +39,21 @@ const logger = pino({
 
 // 添加进程退出时的处理
 process.on("exit", () => {
-  logger.info("进程退出，日志关闭");
+  logger.info("Process exiting, shutting down logger.");
 });
 
 process.on("SIGINT", () => {
-  logger.info("收到SIGINT信号，日志关闭");
+  logger.info("Received SIGINT, shutting down logger.");
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-  logger.info("收到SIGTERM信号，日志关闭");
+  logger.info("Received SIGTERM, shutting down logger.");
   process.exit(0);
 });
 
 process.on("uncaughtException", (error) => {
-  logger.error({ err: error }, "未捕获的异常");
+  logger.error({ err: error }, "Uncaught exception.");
   process.exit(1);
 });
 
