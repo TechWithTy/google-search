@@ -27,6 +27,7 @@ export interface CommandOptions {
   locale?: string;
   manualVerification?: boolean;
   googleDomain?: string;
+  reuseBrowserKey?: string;
 }
 
 /**

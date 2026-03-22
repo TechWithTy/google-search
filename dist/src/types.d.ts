@@ -25,6 +25,7 @@ export interface CommandOptions {
     locale?: string;
     manualVerification?: boolean;
     googleDomain?: string;
+    reuseBrowserKey?: string;
 }
 /**
  * HTML响应接口 - 用于获取原始搜索页面HTML

@@ -3,6 +3,12 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import logger from "./logger.js";
+const reusableBrowsers = new Map();
+function dropReusableBrowser(reuseBrowserKey) {
+    if (reuseBrowserKey) {
+        reusableBrowsers.delete(reuseBrowserKey);
+    }
+}
 const DEFAULT_LOCALE = "en-US";
 const DEFAULT_TIMEZONE = "America/Denver";
 const DEFAULT_GOOGLE_DOMAIN = "https://www.google.com/ncr";
@@ -109,7 +115,7 @@ function getHostMachineConfig(userLocale) {
  */
 export async function googleSearch(query, options = {}, existingBrowser) {
     // 设置默认选项
-    const { limit = 10, timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, googleDomain = DEFAULT_GOOGLE_DOMAIN, } = options;
+    const { limit = 10, timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, googleDomain = DEFAULT_GOOGLE_DOMAIN, reuseBrowserKey, } = options;
     let useHeadless = manualVerification ? false : headless;
     logger.info({ options }, "Initializing browser...");
     // 检查是否存在状态文件
@@ -166,10 +172,16 @@ export async function googleSearch(query, options = {}, existingBrowser) {
     async function performSearch(headless) {
         let browser;
         let browserWasProvided = false;
+        const reusableBrowser = reuseBrowserKey ? reusableBrowsers.get(reuseBrowserKey) : undefined;
         if (existingBrowser) {
             browser = existingBrowser;
             browserWasProvided = true;
-            logger.info("使用已存在的浏览器实例");
+            logger.info("Using provided browser instance.");
+        }
+        else if (reusableBrowser) {
+            browser = reusableBrowser;
+            browserWasProvided = true;
+            logger.info({ reuseBrowserKey }, "Reusing browser instance from session cache.");
         }
         else {
             logger.info({ headless }, `Preparing to launch the browser in ${headless ? "headless" : "headed"} mode...`);
@@ -207,6 +219,9 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                 ignoreDefaultArgs: ["--enable-automation"],
             });
             logger.info("Browser started successfully.");
+            if (reuseBrowserKey) {
+                reusableBrowsers.set(reuseBrowserKey, browser);
+            }
         }
         // 获取设备配置 - 使用保存的或随机生成
         const [deviceName, deviceConfig] = getDeviceConfig();
@@ -397,6 +412,7 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                     }
                     else {
                         // 如果不是外部提供的浏览器，直接关闭并重新执行搜索
+                        dropReusableBrowser(reuseBrowserKey);
                         await browser.close();
                         return performSearch(false); // 以有头模式重新执行搜索
                     }
@@ -502,6 +518,7 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                     }
                     else {
                         // 如果不是外部提供的浏览器，直接关闭并重新执行搜索
+                        dropReusableBrowser(reuseBrowserKey);
                         await browser.close();
                         return performSearch(false); // 以有头模式重新执行搜索
                     }
@@ -783,12 +800,12 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                 logger.error({ error }, "Failed while saving browser state.");
             }
             // 只有在浏览器不是外部提供的情况下才关闭浏览器
-            if (!browserWasProvided) {
+            if (!browserWasProvided && !reuseBrowserKey) {
                 logger.info("Closing browser...");
                 await browser.close();
             }
             else {
-                logger.info("Keeping the browser instance open.");
+                logger.info("Keeping browser instance open for reuse.");
             }
             // 返回搜索结果
             return {
@@ -821,12 +838,12 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                 logger.error({ error: stateError }, "保存浏览器状态时发生错误");
             }
             // 只有在浏览器不是外部提供的情况下才关闭浏览器
-            if (!browserWasProvided) {
+            if (!browserWasProvided && !reuseBrowserKey) {
                 logger.info("Closing browser...");
                 await browser.close();
             }
             else {
-                logger.info("保持浏览器实例打开状态");
+                logger.info("Keeping browser instance open for reuse.");
             }
             // 返回错误信息或空结果
             // logger.error 已经记录了错误，这里返回一个包含错误信息的模拟结果
@@ -845,6 +862,20 @@ export async function googleSearch(query, options = {}, existingBrowser) {
     }
     // 首先尝试以无头模式执行搜索
     return performSearch(useHeadless);
+}
+export async function closeReusableGoogleSearchBrowser(reuseBrowserKey) {
+    const browser = reusableBrowsers.get(reuseBrowserKey);
+    if (!browser) {
+        return false;
+    }
+    reusableBrowsers.delete(reuseBrowserKey);
+    try {
+        await browser.close();
+    }
+    catch (error) {
+        logger.warn({ error, reuseBrowserKey }, "Failed to close reusable browser cleanly.");
+    }
+    return true;
 }
 /**
  * 获取Google搜索结果页面的原始HTML
