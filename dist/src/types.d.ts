@@ -25,6 +25,7 @@ export interface CommandOptions {
     noSaveState?: boolean;
     locale?: string;
     manualVerification?: boolean;
+    verificationMode?: "manual" | "error";
     googleDomain?: string;
     reuseBrowserKey?: string;
     onVerificationChallenge?: (details: {

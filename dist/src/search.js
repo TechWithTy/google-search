@@ -21,7 +21,7 @@ function getPreferredTimezone() {
         return DEFAULT_TIMEZONE;
     }
 }
-async function waitForManualVerification(page, sorryPatterns, timeout, reason, onVerificationChallenge) {
+async function waitForManualVerification(page, sorryPatterns, timeout, reason, verificationMode = "manual", onVerificationChallenge) {
     const verificationTimeout = Math.max(timeout * 6, 300000);
     logger.warn({
         reason,
@@ -39,6 +39,9 @@ async function waitForManualVerification(page, sorryPatterns, timeout, reason, o
         catch (error) {
             logger.warn({ error, reason }, "Failed while sending the verification challenge notification.");
         }
+    }
+    if (verificationMode === "error") {
+        throw new Error(`VERIFICATION_REQUIRED|${reason}|${page.url()}`);
     }
     await page.waitForURL((url) => {
         const urlStr = url.toString();
@@ -127,7 +130,7 @@ function getHostMachineConfig(userLocale) {
  */
 export async function googleSearch(query, options = {}, existingBrowser) {
     // 设置默认选项
-    const { limit = 10, maxPages = 1, timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, googleDomain = DEFAULT_GOOGLE_DOMAIN, reuseBrowserKey, onVerificationChallenge, } = options;
+    const { limit = 10, maxPages = 1, timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, verificationMode = manualVerification ? "manual" : "error", googleDomain = DEFAULT_GOOGLE_DOMAIN, reuseBrowserKey, onVerificationChallenge, } = options;
     let useHeadless = manualVerification ? false : headless;
     logger.info({ options }, "Initializing browser...");
     // 检查是否存在状态文件
@@ -606,7 +609,7 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                     }
                 }
                 else {
-                    await waitForManualVerification(page, sorryPatterns, timeout, "initial-page", onVerificationChallenge);
+                    await waitForManualVerification(page, sorryPatterns, timeout, "initial-page", verificationMode, onVerificationChallenge);
                 }
             }
             logger.info({ query }, "Entering search query.");
@@ -712,7 +715,7 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                     }
                 }
                 else {
-                    await waitForManualVerification(page, sorryPatterns, timeout, "after-search", onVerificationChallenge);
+                    await waitForManualVerification(page, sorryPatterns, timeout, "after-search", verificationMode, onVerificationChallenge);
                     // 等待页面重新加载
                     await page.waitForLoadState("networkidle", { timeout });
                 }
@@ -809,7 +812,7 @@ export async function googleSearch(query, options = {}, existingBrowser) {
                         }
                     }
                     else {
-                        await waitForManualVerification(page, sorryPatterns, timeout, "results-page", onVerificationChallenge);
+                        await waitForManualVerification(page, sorryPatterns, timeout, "results-page", verificationMode, onVerificationChallenge);
                         // 再次尝试等待搜索结果
                         for (const selector of searchResultSelectors) {
                             try {
@@ -989,7 +992,7 @@ export async function closeReusableGoogleSearchBrowser(reuseBrowserKey) {
  */
 export async function getGoogleSearchPageHtml(query, options = {}, saveToFile = false, outputPath) {
     // 设置默认选项，与googleSearch保持一致
-    const { timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, googleDomain = DEFAULT_GOOGLE_DOMAIN, onVerificationChallenge, } = options;
+    const { timeout = 60000, stateFile = "./browser-state.json", noSaveState = false, locale = DEFAULT_LOCALE, headless = true, manualVerification = false, verificationMode = manualVerification ? "manual" : "error", googleDomain = DEFAULT_GOOGLE_DOMAIN, onVerificationChallenge, } = options;
     let useHeadless = manualVerification ? false : headless;
     logger.info({ options }, "Initializing browser to fetch search result page HTML...");
     // 复用googleSearch中的浏览器初始化代码
@@ -1219,7 +1222,7 @@ export async function getGoogleSearchPageHtml(query, options = {}, saveToFile = 
                     return performSearchAndGetHtml(false);
                 }
                 else {
-                    await waitForManualVerification(page, sorryPatterns, timeout, "html-initial-page", onVerificationChallenge);
+                    await waitForManualVerification(page, sorryPatterns, timeout, "html-initial-page", verificationMode, onVerificationChallenge);
                 }
             }
             logger.info({ query }, "Entering search query.");
@@ -1269,7 +1272,7 @@ export async function getGoogleSearchPageHtml(query, options = {}, saveToFile = 
                     return performSearchAndGetHtml(false);
                 }
                 else {
-                    await waitForManualVerification(page, sorryPatterns, timeout, "html-after-search", onVerificationChallenge);
+                    await waitForManualVerification(page, sorryPatterns, timeout, "html-after-search", verificationMode, onVerificationChallenge);
                     // 等待页面重新加载
                     await page.waitForLoadState("networkidle", { timeout });
                 }
