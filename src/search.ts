@@ -47,7 +47,12 @@ async function waitForManualVerification(
   page: Page,
   sorryPatterns: string[],
   timeout: number,
-  reason: string
+  reason: string,
+  onVerificationChallenge?: (details: {
+    reason: string;
+    url: string;
+    verificationTimeout: number;
+  }) => Promise<void> | void
 ) {
   const verificationTimeout = Math.max(timeout * 6, 300000);
 
@@ -59,6 +64,18 @@ async function waitForManualVerification(
     },
     "Detected a verification challenge. This implementation does not auto-solve CAPTCHA and will wait for manual completion."
   );
+
+  if (onVerificationChallenge) {
+    try {
+      await onVerificationChallenge({
+        reason,
+        url: page.url(),
+        verificationTimeout,
+      });
+    } catch (error) {
+      logger.warn({ error, reason }, "Failed while sending the verification challenge notification.");
+    }
+  }
 
   await page.waitForURL(
     (url) => {
@@ -161,6 +178,7 @@ export async function googleSearch(
   // 设置默认选项
   const {
     limit = 10,
+    maxPages = 1,
     timeout = 60000,
     stateFile = "./browser-state.json",
     noSaveState = false,
@@ -169,6 +187,7 @@ export async function googleSearch(
     manualVerification = false,
     googleDomain = DEFAULT_GOOGLE_DOMAIN,
     reuseBrowserKey,
+    onVerificationChallenge,
   } = options;
 
   let useHeadless = manualVerification ? false : headless;
@@ -238,6 +257,193 @@ export async function googleSearch(
     return Math.floor(Math.random() * (max - min + 1)) + min;
   };
 
+  const normalizeResultLink = (rawLink: string) => {
+    try {
+      const url = new URL(rawLink);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return String(rawLink || "").split("#")[0] || String(rawLink || "");
+    }
+  };
+
+  const shouldKeepResult = (result: SearchResult) => {
+    const title = String(result.title || "").trim();
+    const link = String(result.link || "").trim();
+    if (!title || !link) return false;
+    if (/^read more$/i.test(title)) return false;
+    if (/^about this result$/i.test(title)) return false;
+    if (/google\.com\/|accounts\.google|support\.google/i.test(link)) return false;
+    if (/#:~:text=/i.test(String(result.link || ""))) return false;
+    return true;
+  };
+
+  const extractSearchResults = async (
+    page: Page,
+    maxResults: number
+  ): Promise<SearchResult[]> => {
+    return await page.evaluate((pageLimit: number): SearchResult[] => {
+      const results: { title: string; link: string; snippet: string }[] = [];
+      const seenUrls = new Set<string>();
+
+      const normalizeLink = (rawLink: string) => {
+        try {
+          const url = new URL(rawLink);
+          url.hash = "";
+          return url.toString();
+        } catch {
+          return rawLink.split("#")[0] || rawLink;
+        }
+      };
+
+      const shouldSkipResult = (title: string, link: string) => {
+        const normalizedTitle = (title || "").trim();
+        const normalizedLink = (link || "").trim();
+
+        if (!normalizedLink || !normalizedLink.startsWith("http")) return true;
+        if (/google\.com\/|accounts\.google|support\.google/i.test(normalizedLink)) return true;
+        if (/#:~:text=/i.test(link)) return true;
+        if (/^read more$/i.test(normalizedTitle)) return true;
+        if (/^about this result$/i.test(normalizedTitle)) return true;
+
+        return false;
+      };
+
+      const selectorSets = [
+        { container: '#search div[data-hveid]', title: 'h3', snippet: '.VwiC3b' },
+        { container: '#rso div[data-hveid]', title: 'h3', snippet: '[data-sncf="1"]' },
+        { container: '.g', title: 'h3', snippet: 'div[style*="webkit-line-clamp"]' },
+        { container: 'div[jscontroller][data-hveid]', title: 'h3', snippet: 'div[role="text"]' }
+      ];
+
+      const alternativeSnippetSelectors = [
+        '.VwiC3b',
+        '[data-sncf="1"]',
+        'div[style*="webkit-line-clamp"]',
+        'div[role="text"]'
+      ];
+
+      for (const selectors of selectorSets) {
+        if (results.length >= pageLimit) break;
+
+        const containers = document.querySelectorAll(selectors.container);
+
+        for (const container of containers) {
+          if (results.length >= pageLimit) break;
+
+          const titleElement = container.querySelector(selectors.title);
+          if (!titleElement) continue;
+
+          const title = (titleElement.textContent || "").trim();
+
+          let link = '';
+          const linkInTitle = titleElement.querySelector('a');
+          if (linkInTitle) {
+            link = linkInTitle.href;
+          } else {
+            let current: Element | null = titleElement;
+            while (current && current.tagName !== 'A') {
+              current = current.parentElement;
+            }
+            if (current && current instanceof HTMLAnchorElement) {
+              link = current.href;
+            } else {
+              const containerLink = container.querySelector('a');
+              if (containerLink) {
+                link = containerLink.href;
+              }
+            }
+          }
+
+          link = normalizeLink(link);
+          if (shouldSkipResult(title, link) || seenUrls.has(link)) continue;
+
+          let snippet = '';
+          const snippetElement = container.querySelector(selectors.snippet);
+          if (snippetElement) {
+            snippet = (snippetElement.textContent || "").trim();
+          } else {
+            for (const altSelector of alternativeSnippetSelectors) {
+              const element = container.querySelector(altSelector);
+              if (element) {
+                snippet = (element.textContent || "").trim();
+                break;
+              }
+            }
+
+            if (!snippet) {
+              const textNodes = Array.from(container.querySelectorAll('div')).filter(el =>
+                !el.querySelector('h3') &&
+                (el.textContent || "").trim().length > 20
+              );
+              if (textNodes.length > 0) {
+                snippet = (textNodes[0].textContent || "").trim();
+              }
+            }
+          }
+
+          if (title && link) {
+              results.push({ title, link, snippet });
+              seenUrls.add(link);
+          }
+        }
+      }
+
+      if (results.length < pageLimit) {
+        const anchorElements = Array.from(document.querySelectorAll("a[href^='http']"));
+        for (const el of anchorElements) {
+          if (results.length >= pageLimit) break;
+          if (!(el instanceof HTMLAnchorElement)) {
+            continue;
+          }
+          const title = (el.textContent || "").trim();
+          const link = normalizeLink(el.href);
+          if (shouldSkipResult(title, link) || seenUrls.has(link)) {
+            continue;
+          }
+          if (!title) continue;
+
+          let snippet = "";
+          let parent = el.parentElement;
+          for (let i = 0; i < 3 && parent; i++) {
+            const text = (parent.textContent || "").trim();
+            if (text.length > 20 && text !== title) {
+              snippet = text;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+
+          results.push({ title, link, snippet });
+          seenUrls.add(link);
+        }
+      }
+
+      return results.slice(0, pageLimit);
+    }, maxResults);
+  };
+
+  const gotoNextResultsPage = async (page: Page): Promise<boolean> => {
+    const nextSelectors = [
+      '#pnnext',
+      'a[aria-label="Next page"]',
+      'a[aria-label="Next"]',
+    ];
+
+    for (const selector of nextSelectors) {
+      const nextLink = await page.$(selector);
+      if (!nextLink) continue;
+
+      await Promise.all([
+        page.waitForLoadState("networkidle", { timeout }),
+        nextLink.click(),
+      ]);
+      return true;
+    }
+
+    return false;
+  };
+
   // 定义一个函数来执行搜索，可以重用于无头和有头模式
   async function performSearch(headless: boolean): Promise<SearchResponse> {
     let browser: Browser;
@@ -250,7 +456,6 @@ export async function googleSearch(
       logger.info("Using provided browser instance.");
     } else if (reusableBrowser) {
       browser = reusableBrowser;
-      browserWasProvided = true;
       logger.info({ reuseBrowserKey }, "Reusing browser instance from session cache.");
     } else {
       logger.info(
@@ -528,7 +733,7 @@ export async function googleSearch(
             return performSearch(false); // 以有头模式重新执行搜索
           }
         } else {
-          await waitForManualVerification(page, sorryPatterns, timeout, "initial-page");
+          await waitForManualVerification(page, sorryPatterns, timeout, "initial-page", onVerificationChallenge);
         }
       }
 
@@ -654,7 +859,7 @@ export async function googleSearch(
             return performSearch(false); // 以有头模式重新执行搜索
           }
         } else {
-          await waitForManualVerification(page, sorryPatterns, timeout, "after-search");
+          await waitForManualVerification(page, sorryPatterns, timeout, "after-search", onVerificationChallenge);
 
           // 等待页面重新加载
           await page.waitForLoadState("networkidle", { timeout });
@@ -760,11 +965,12 @@ export async function googleSearch(
               }
             } else {
               // 如果不是外部提供的浏览器，直接关闭并重新执行搜索
+              dropReusableBrowser(reuseBrowserKey);
               await browser.close();
               return performSearch(false); // 以有头模式重新执行搜索
             }
           } else {
-            await waitForManualVerification(page, sorryPatterns, timeout, "results-page");
+            await waitForManualVerification(page, sorryPatterns, timeout, "results-page", onVerificationChallenge);
 
             // 再次尝试等待搜索结果
             for (const selector of searchResultSelectors) {
@@ -795,140 +1001,50 @@ export async function googleSearch(
 
       logger.info("Extracting search results...");
 
-      let results: SearchResult[] = []; // 在 evaluate 调用之前声明 results
+      const requestedPages = Math.max(1, Math.floor(maxPages || 1));
+      const aggregatedResults: SearchResult[] = [];
+      const seenLinks = new Set<string>();
 
-      // 提取搜索结果 - 使用移植自 google-search-extractor.cjs 的逻辑
-      results = await page.evaluate((maxResults: number): SearchResult[] => { // 添加返回类型
-        const results: { title: string; link: string; snippet: string }[] = [];
-        const seenUrls = new Set<string>(); // 用于去重
-
-        // 定义多组选择器，按优先级排序 (参考 google-search-extractor.cjs)
-        const selectorSets = [
-          { container: '#search div[data-hveid]', title: 'h3', snippet: '.VwiC3b' },
-          { container: '#rso div[data-hveid]', title: 'h3', snippet: '[data-sncf="1"]' },
-          { container: '.g', title: 'h3', snippet: 'div[style*="webkit-line-clamp"]' },
-          { container: 'div[jscontroller][data-hveid]', title: 'h3', snippet: 'div[role="text"]' }
-        ];
-
-        // 备用摘要选择器
-        const alternativeSnippetSelectors = [
-          '.VwiC3b',
-          '[data-sncf="1"]',
-          'div[style*="webkit-line-clamp"]',
-          'div[role="text"]'
-        ];
-
-        // 尝试每组选择器
-        for (const selectors of selectorSets) {
-          if (results.length >= maxResults) break; // 如果已达到数量限制，停止
-
-          const containers = document.querySelectorAll(selectors.container);
-
-          for (const container of containers) {
-            if (results.length >= maxResults) break;
-
-            const titleElement = container.querySelector(selectors.title);
-            if (!titleElement) continue;
-
-            const title = (titleElement.textContent || "").trim();
-
-            // 查找链接
-            let link = '';
-            const linkInTitle = titleElement.querySelector('a');
-            if (linkInTitle) {
-              link = linkInTitle.href;
-            } else {
-              let current: Element | null = titleElement;
-              while (current && current.tagName !== 'A') {
-                current = current.parentElement;
-              }
-              if (current && current instanceof HTMLAnchorElement) {
-                link = current.href;
-              } else {
-                const containerLink = container.querySelector('a');
-                if (containerLink) {
-                  link = containerLink.href;
-                }
-              }
-            }
-
-            // 过滤无效或重复链接
-            if (!link || !link.startsWith('http') || seenUrls.has(link)) continue;
-
-            // 查找摘要
-            let snippet = '';
-            const snippetElement = container.querySelector(selectors.snippet);
-            if (snippetElement) {
-              snippet = (snippetElement.textContent || "").trim();
-            } else {
-              // 尝试其他摘要选择器
-              for (const altSelector of alternativeSnippetSelectors) {
-                const element = container.querySelector(altSelector);
-                if (element) {
-                  snippet = (element.textContent || "").trim();
-                  break;
-                }
-              }
-
-              // 如果仍然没有找到摘要，尝试通用方法
-              if (!snippet) {
-                const textNodes = Array.from(container.querySelectorAll('div')).filter(el =>
-                  !el.querySelector('h3') &&
-                  (el.textContent || "").trim().length > 20
-                );
-                if (textNodes.length > 0) {
-                  snippet = (textNodes[0].textContent || "").trim();
-                }
-              }
-            }
-
-            // 只添加有标题和链接的结果
-            if (title && link) {
-              results.push({ title, link, snippet });
-              seenUrls.add(link); // 记录已处理的URL
-            }
-          }
-        }
-        
-        // 如果主要选择器未找到足够结果，尝试更通用的方法 (作为补充)
-        if (results.length < maxResults) {
-            const anchorElements = Array.from(document.querySelectorAll("a[href^='http']"));
-            for (const el of anchorElements) {
-                if (results.length >= maxResults) break;
-
-                // 检查 el 是否为 HTMLAnchorElement
-                if (!(el instanceof HTMLAnchorElement)) {
-                    continue;
-                }
-                const link = el.href;
-                // 过滤掉导航链接、图片链接、已存在链接等
-                if (!link || seenUrls.has(link) || link.includes("google.com/") || link.includes("accounts.google") || link.includes("support.google")) {
-                    continue;
-                }
-
-                const title = (el.textContent || "").trim();
-                if (!title) continue; // 跳过没有文本内容的链接
-
-                // 尝试获取周围的文本作为摘要
-                let snippet = "";
-                let parent = el.parentElement;
-                for (let i = 0; i < 3 && parent; i++) {
-                  const text = (parent.textContent || "").trim();
-                  // 确保摘要文本与标题不同且有一定长度
-                  if (text.length > 20 && text !== title) {
-                    snippet = text;
-                    break; // 找到合适的摘要就停止向上查找
-                  }
-                  parent = parent.parentElement;
-                }
-
-                results.push({ title, link, snippet });
-                seenUrls.add(link);
-            }
+      for (let pageIndex = 0; pageIndex < requestedPages; pageIndex += 1) {
+        const remaining = Math.max(limit - aggregatedResults.length, 0);
+        if (remaining === 0) {
+          break;
         }
 
-        return results.slice(0, maxResults); // 确保不超过限制
-      }, limit); // 将 limit 传递给 evaluate 函数
+        const pageResults = await extractSearchResults(page, remaining);
+        for (const rawResult of pageResults) {
+          const result = {
+            ...rawResult,
+            title: String(rawResult.title || "").trim(),
+            link: normalizeResultLink(rawResult.link || ""),
+            snippet: String(rawResult.snippet || "").trim(),
+          };
+
+          if (!shouldKeepResult(result) || seenLinks.has(result.link)) continue;
+          seenLinks.add(result.link);
+          aggregatedResults.push(result);
+          if (aggregatedResults.length >= limit) break;
+        }
+
+        if (aggregatedResults.length >= limit || pageIndex >= requestedPages - 1) {
+          break;
+        }
+
+        logger.info(
+          { currentPage: pageIndex + 1, requestedPages, collected: aggregatedResults.length },
+          "Moving to the next Google results page..."
+        );
+
+        const moved = await gotoNextResultsPage(page);
+        if (!moved) {
+          logger.info({ currentPage: pageIndex + 1 }, "No next results page found.");
+          break;
+        }
+
+        await page.waitForTimeout(getRandomDelay(250, 600));
+      }
+
+      const results = aggregatedResults.slice(0, limit);
 
       logger.info({ count: results.length }, "Retrieved search results successfully.");
 
@@ -1075,6 +1191,7 @@ export async function getGoogleSearchPageHtml(
     headless = true,
     manualVerification = false,
     googleDomain = DEFAULT_GOOGLE_DOMAIN,
+    onVerificationChallenge,
   } = options;
 
   let useHeadless = manualVerification ? false : headless;
@@ -1355,7 +1472,7 @@ export async function getGoogleSearchPageHtml(
           // 以有头模式重新执行
           return performSearchAndGetHtml(false);
         } else {
-          await waitForManualVerification(page, sorryPatterns, timeout, "html-initial-page");
+          await waitForManualVerification(page, sorryPatterns, timeout, "html-initial-page", onVerificationChallenge);
         }
       }
 
@@ -1419,7 +1536,7 @@ export async function getGoogleSearchPageHtml(
           // 以有头模式重新执行
           return performSearchAndGetHtml(false);
         } else {
-          await waitForManualVerification(page, sorryPatterns, timeout, "html-after-search");
+          await waitForManualVerification(page, sorryPatterns, timeout, "html-after-search", onVerificationChallenge);
 
           // 等待页面重新加载
           await page.waitForLoadState("networkidle", { timeout });

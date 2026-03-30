@@ -20,6 +20,7 @@ export interface SearchResponse {
  */
 export interface CommandOptions {
   limit?: number;
+  maxPages?: number;
   timeout?: number;
   headless?: boolean;
   stateFile?: string;
@@ -28,6 +29,11 @@ export interface CommandOptions {
   manualVerification?: boolean;
   googleDomain?: string;
   reuseBrowserKey?: string;
+  onVerificationChallenge?: (details: {
+    reason: string;
+    url: string;
+    verificationTimeout: number;
+  }) => Promise<void> | void;
 }
 
 /**
